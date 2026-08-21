@@ -5,8 +5,8 @@ Unofficial container image for the [primecrunch](https://primecrunch.com) client
 Images are published to GHCR and tagged by upstream client version:
 
 ```
-ghcr.io/angelobrsa/primecrunch:3.3.38
-ghcr.io/angelobrsa/primecrunch:latest
+ghcr.io/angelobrsa/primecrunch-docker:3.3.38
+ghcr.io/angelobrsa/primecrunch-docker:latest
 ```
 
 ---
@@ -17,7 +17,7 @@ ghcr.io/angelobrsa/primecrunch:latest
 docker run -d \
   -e CRUNCH_EMAIL=you@example.com \
   -e CRUNCH_PASSWORD=yourpassword \
-  ghcr.io/angelobrsa/primecrunch:latest
+  ghcr.io/angelobrsa/primecrunch-docker:latest
 ```
 
 The container authenticates at startup and begins crunching immediately. No config files to pre-generate — just supply credentials.
@@ -28,7 +28,7 @@ Limit CPU usage with `-p`:
 docker run -d \
   -e CRUNCH_EMAIL=you@example.com \
   -e CRUNCH_PASSWORD=yourpassword \
-  ghcr.io/angelobrsa/primecrunch:latest \
+  ghcr.io/angelobrsa/primecrunch-docker:latest \
   -p 4
 ```
 
@@ -76,7 +76,7 @@ spec:
         runAsGroup: 1000
       containers:
         - name: crunch
-          image: ghcr.io/angelobrsa/primecrunch:3.3.38
+          image: ghcr.io/angelobrsa/primecrunch-docker:3.3.38
           args: ["-p", "2"]
           env:
             - name: CRUNCH_EMAIL
