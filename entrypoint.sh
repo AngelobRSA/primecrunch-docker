@@ -54,4 +54,8 @@ EOF
 chmod 600 "$CRUNCH_DIR/crunch.yaml"
 echo "Authenticated as ${WORKER_NAME} (${CLIENT_ID})" >&2
 
-exec /usr/local/bin/crunch -c "$CRUNCH_DIR" -tui=false "$@"
+# Auto-update is disabled (-u defaults to true upstream). The client replaces its own
+# binary at /usr/local/bin/crunch, which is not owned by the runtime user (uid 1000),
+# so the update can only ever fail.
+# The image tag is the unit of versioning instead. Passing -u=true in args still overrides.
+exec /usr/local/bin/crunch -c "$CRUNCH_DIR" -tui=false -u=false "$@"

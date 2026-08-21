@@ -1,0 +1,193 @@
+name: Check for client updates
+
+on:
+  schedule:
+    # Daily at 06:00 UTC
+    - cron: '0 6 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+env:
+  MANIFEST_URL: https://api.primecrunch.com/v2/update
+  # Which build the image tracks. Must match the FROM/download in the Dockerfile.
+  CHANNEL: stable
+  TARGET_OS: linux
+  TARGET_ARCH: amd64
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Read pinned version from Dockerfile
+        id: current
+        run: |
+          set -euo pipefail
+          version=$(sed -n 's/^ARG VERSION=//p' Dockerfile)
+          sha=$(sed -n 's/^ARG SHA256=//p' Dockerfile)
+          if [ -z "$version" ] || [ -z "$sha" ]; then
+            echo "::error::Could not parse ARG VERSION / ARG SHA256 from Dockerfile"
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          echo "Pinned: $version ($sha)"
+
+      - name: Fetch upstream manifest
+        id: upstream
+        run: |
+          set -euo pipefail
+          curl -fsSL --retry 3 --retry-all-errors --max-time 60 "$MANIFEST_URL" -o manifest.json
+
+          entry=$(jq -e --arg a "$TARGET_ARCH" --arg o "$TARGET_OS" --arg c "$CHANNEL" \
+            '.[$a][$o][$c] // empty' manifest.json) || {
+              echo "::error::No manifest entry for $TARGET_ARCH/$TARGET_OS/$CHANNEL"
+              exit 1
+            }
+
+          version=$(jq -rn --argjson e "$entry" '$e.version // empty' | sed 's/^v//')
+          sha=$(jq -rn --argjson e "$entry" '$e.sha256 // empty')
+          filename=$(jq -rn --argjson e "$entry" '$e.filename // empty')
+
+          # Guard against a malformed/partial manifest rewriting the Dockerfile with junk.
+          case "$version" in
+            [0-9]*.[0-9]*.[0-9]*) ;;
+            *) echo "::error::Unexpected version format: '$version'"; exit 1 ;;
+          esac
+          if ! printf '%s' "$sha" | grep -qE '^[0-9a-f]{64}$'; then
+            echo "::error::Unexpected sha256 format: '$sha'"
+            exit 1
+          fi
+
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          echo "filename=$filename" >> "$GITHUB_OUTPUT"
+          echo "Upstream $CHANNEL: $version ($sha)"
+
+      - name: Compare versions
+        id: compare
+        env:
+          CURRENT: ${{ steps.current.outputs.version }}
+          LATEST: ${{ steps.upstream.outputs.version }}
+          CURRENT_SHA: ${{ steps.current.outputs.sha }}
+          LATEST_SHA: ${{ steps.upstream.outputs.sha }}
+        run: |
+          set -euo pipefail
+          if [ "$CURRENT" = "$LATEST" ]; then
+            if [ "$CURRENT_SHA" != "$LATEST_SHA" ]; then
+              # Same version, different hash: the pin drifted (or upstream re-cut the release).
+              echo "::warning::Version $CURRENT matches but SHA256 differs - correcting the pin"
+              echo "update=true" >> "$GITHUB_OUTPUT"
+            else
+              echo "Already up to date at $CURRENT"
+              echo "update=false" >> "$GITHUB_OUTPUT"
+            fi
+            exit 0
+          fi
+
+          # Only ever move forward, so a transient upstream rollback can't downgrade the image.
+          newest=$(printf '%s\n%s\n' "$CURRENT" "$LATEST" | sort -V | tail -n1)
+          if [ "$newest" = "$CURRENT" ]; then
+            echo "::warning::Upstream $LATEST is older than pinned $CURRENT - ignoring"
+            echo "update=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "Update available: $CURRENT -> $LATEST"
+            echo "update=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Verify the published tarball matches the manifest
+        if: steps.compare.outputs.update == 'true'
+        env:
+          FILENAME: ${{ steps.upstream.outputs.filename }}
+          EXPECTED_SHA: ${{ steps.upstream.outputs.sha }}
+        run: |
+          set -euo pipefail
+          # Don't open a PR pinning a hash we haven't confirmed against the real artifact.
+          curl -fsSL --retry 3 --retry-all-errors --max-time 300 \
+            "https://api.primecrunch.com/v2/upgrade/${FILENAME}" -o candidate.tar.gz
+          printf '%s  candidate.tar.gz\n' "$EXPECTED_SHA" | sha256sum -c -
+          tar -tzf candidate.tar.gz >/dev/null
+          rm -f candidate.tar.gz
+
+      - name: Apply the bump
+        if: steps.compare.outputs.update == 'true'
+        env:
+          LATEST: ${{ steps.upstream.outputs.version }}
+          LATEST_SHA: ${{ steps.upstream.outputs.sha }}
+        run: |
+          set -euo pipefail
+          sed -i "s|^ARG VERSION=.*|ARG VERSION=${LATEST}|" Dockerfile
+          sed -i "s|^ARG SHA256=.*|ARG SHA256=${LATEST_SHA}|" Dockerfile
+          git diff -- Dockerfile
+
+      - name: Open pull request
+        if: steps.compare.outputs.update == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CURRENT: ${{ steps.current.outputs.version }}
+          LATEST: ${{ steps.upstream.outputs.version }}
+          LATEST_SHA: ${{ steps.upstream.outputs.sha }}
+          FILENAME: ${{ steps.upstream.outputs.filename }}
+        run: |
+          set -euo pipefail
+          branch="client-update/${LATEST}"
+
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          # Reuse a stable branch name per version so re-runs update the branch
+          # instead of piling up duplicate PRs.
+          git checkout -B "$branch"
+          git add Dockerfile
+          git commit -m "chore: update primecrunch client to ${LATEST}"
+          # This branch namespace is exclusively bot-owned and recreated per version,
+          # so a plain force-push is the predictable choice here.
+          git push --force origin "$branch"
+
+          if gh pr view "$branch" --json number --jq .number >/dev/null 2>&1; then
+            echo "PR already open for $branch; branch updated in place."
+            exit 0
+          fi
+
+          {
+            echo "Automated update from the upstream release manifest."
+            echo
+            echo "| | |"
+            echo "|---|---|"
+            echo "| Current | \`${CURRENT}\` |"
+            echo "| New | \`${LATEST}\` |"
+            echo "| Channel | \`${CHANNEL}\` |"
+            echo "| Target | \`${TARGET_OS}/${TARGET_ARCH}\` |"
+            echo "| File | \`${FILENAME}\` |"
+            echo "| SHA-256 | \`${LATEST_SHA}\` |"
+            echo
+            echo "The tarball was downloaded and its SHA-256 verified against the"
+            echo "manifest before this PR was opened."
+            echo
+            echo "Source: ${MANIFEST_URL}"
+            echo
+            echo "Merging this triggers **Build and publish image**, which pushes"
+            echo "\`${LATEST}\` and \`latest\` to GHCR."
+          } > pr-body.md
+
+          gh pr create \
+            --base "${GITHUB_REF_NAME}" \
+            --head "$branch" \
+            --title "chore: update primecrunch client to ${LATEST}" \
+            --body-file pr-body.md
+
+      - name: Summary
+        run: |
+          {
+            echo "### primecrunch update check"
+            echo ""
+            echo "- Pinned: \`${{ steps.current.outputs.version }}\`"
+            echo "- Upstream (${CHANNEL}): \`${{ steps.upstream.outputs.version }}\`"
+            echo "- Update opened: \`${{ steps.compare.outputs.update }}\`"
+          } >> "$GITHUB_STEP_SUMMARY"

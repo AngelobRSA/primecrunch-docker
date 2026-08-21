@@ -5,7 +5,7 @@ Unofficial container image for the [primecrunch](https://primecrunch.com) client
 Images are published to GHCR and tagged by upstream client version:
 
 ```
-ghcr.io/angelobrsa/primecrunch:3.3.7
+ghcr.io/angelobrsa/primecrunch:3.3.38
 ghcr.io/angelobrsa/primecrunch:latest
 ```
 
@@ -76,8 +76,8 @@ spec:
         runAsGroup: 1000
       containers:
         - name: crunch
-          image: ghcr.io/angelobrsa/primecrunch:3.3.7
-          args: ["-u=false", "-p", "2"]
+          image: ghcr.io/angelobrsa/primecrunch:3.3.38
+          args: ["-p", "2"]
           env:
             - name: CRUNCH_EMAIL
               valueFrom:
@@ -130,6 +130,8 @@ On startup the entrypoint:
 2. Generates a random UUID for `client_id` — the server treats each container as an independent worker
 3. Writes a complete `crunch.yaml` to the working directory and launches the binary with `-tui=false` (no terminal dashboard in a container) and `-u=false` (auto-update disabled — version is managed via the image tag)
 
+The client's `-u` flag (periodic update checks) **defaults to true**, but its updater replaces its own binary at `/usr/local/bin/crunch` — a path not owned by the runtime user (uid 1000), so an in-container update can only ever fail. The entrypoint therefore passes `-u=false` explicitly, and the image tag is the unit of versioning. Pass `-u=true` in `args` if you want the upstream default back.
+
 Each pod's working directory is an `emptyDir` volume — in-progress work units are ephemeral and redownloaded on restart. Completed results are uploaded to the server before the pod ever stops, so nothing is lost.
 
 Worker names on the dashboard follow the pattern `{NAME_PREFIX}-{POD_NAME}`, e.g. `k8s-primecrunch-7d9c8b7f4-abc12`.
@@ -138,9 +140,32 @@ Worker names on the dashboard follow the pattern `{NAME_PREFIX}-{POD_NAME}`, e.g
 
 ## Updating to a new client version
 
-When the upstream primecrunch client releases a new version, bump `ARG VERSION` and `ARG SHA256` in the `Dockerfile` and push. The GitHub Actions workflow builds and publishes the new image automatically. Update your deployment's image tag to pick it up.
+Version bumps are automated. A scheduled workflow (`.github/workflows/update-check.yaml`)
+runs daily and compares the `ARG VERSION` pinned in the `Dockerfile` against upstream's
+release manifest:
 
-The SHA-256 hash for each release is listed on the [primecrunch download page](https://primecrunch.com).
+```
+https://api.primecrunch.com/v2/update
+```
+
+This is the same unauthenticated JSON the official download page reads. It is keyed
+`[arch][os][channel]` and carries `filename`, `version`, `sha256`, `sha512` and `size`.
+
+When a newer `stable` `linux/amd64` build appears, the workflow downloads the tarball,
+verifies its SHA-256 against the manifest, and only then opens a pull request bumping both
+`ARG VERSION` and `ARG SHA256`. Merging the PR triggers the build workflow, which publishes
+the new image to GHCR.
+
+It also corrects the pin if the version matches but the hash has drifted, and refuses to
+move backwards if upstream ever serves an older version.
+
+You can run it on demand from the Actions tab (**Check for client updates** →
+*Run workflow*). To track `beta` or `alpha` instead, change `CHANNEL` in the workflow's
+`env:` block.
+
+Manual bumps still work — edit `ARG VERSION` and `ARG SHA256` together. Taking the hash
+from the manifest above is safer than copying it by hand; mismatched pairs fail the build
+at the `sha256sum -c` step.
 
 ---
 
