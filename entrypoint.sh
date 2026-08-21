@@ -36,7 +36,17 @@ if [ -z "$AT" ] || [ -z "$RT" ]; then
     exit 1
 fi
 
-CLIENT_ID="$(cat /proc/sys/kernel/random/uuid)"
+# The server keys job allocation to client_id (/jobs/allocated?client_id=...), so a
+# worker that returns with a fresh id abandons whatever it had checked out. Reuse the
+# id already in the working directory when there is one; when the field is empty the
+# client generates and saves its own on first run. Each replica has its own CRUNCH_DIR,
+# so replicas still end up with distinct ids.
+CLIENT_ID=""
+if [ -f "$CRUNCH_DIR/crunch.yaml" ]; then
+    CLIENT_ID=$(sed -n 's/^client_id:[[:space:]]*//p' "$CRUNCH_DIR/crunch.yaml" \
+                | head -n1 | tr -d '"\r' | tr -d "'")
+fi
+
 WORKER_NAME="${NAME_PREFIX:-k8s}-${POD_NAME:-$(hostname)}"
 
 cat > "$CRUNCH_DIR/crunch.yaml" << EOF
@@ -52,7 +62,11 @@ client_report_signature: ""
 EOF
 
 chmod 600 "$CRUNCH_DIR/crunch.yaml"
-echo "Authenticated as ${WORKER_NAME} (${CLIENT_ID})" >&2
+if [ -n "$CLIENT_ID" ]; then
+    echo "Authenticated as ${WORKER_NAME} (reusing client_id ${CLIENT_ID})" >&2
+else
+    echo "Authenticated as ${WORKER_NAME} (new client_id will be generated)" >&2
+fi
 
 # Auto-update is disabled (-u defaults to true upstream). The client replaces its own
 # binary at /usr/local/bin/crunch, which is not owned by the runtime user (uid 1000),

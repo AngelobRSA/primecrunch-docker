@@ -127,10 +127,27 @@ Set `-p` to match your CPU request. Each replica gets 2 cores in the example abo
 On startup the entrypoint:
 
 1. Calls `POST https://api.primecrunch.com/v2/login` with `scope: client` to obtain a fresh access token and refresh token pair unique to this container instance
-2. Generates a random UUID for `client_id` — the server treats each container as an independent worker
+2. Reuses the `client_id` already present in the working directory, or leaves the field empty so the client generates and saves its own on first run
 3. Writes a complete `crunch.yaml` to the working directory and launches the binary with `-tui=false` (no terminal dashboard in a container) and `-u=false` (auto-update disabled — version is managed via the image tag)
 
 The client's `-u` flag (periodic update checks) **defaults to true**, but its updater replaces its own binary at `/usr/local/bin/crunch` — a path not owned by the runtime user (uid 1000), so an in-container update can only ever fail. The entrypoint therefore passes `-u=false` explicitly, and the image tag is the unit of versioning. Pass `-u=true` in `args` if you want the upstream default back.
+
+### Worker identity and abandoned jobs
+
+The server keys job allocation to `client_id` (`/jobs/allocated?client_id=...`). A worker
+that comes back with a *new* id is a new worker as far as the server is concerned, and
+whatever the old id had checked out is left stranded.
+
+The entrypoint therefore preserves `client_id` across restarts: if `$CRUNCH_DIR/crunch.yaml`
+already has one it is reused, otherwise the field is left empty and the client generates and
+saves its own. Replicas still get distinct ids, because each has its own `CRUNCH_DIR`.
+
+**This only helps if the working directory survives.** With `emptyDir` (below) the volume is
+discarded when the pod is rescheduled, so a replacement pod starts fresh and still orphans
+its predecessor's work. For a worker whose identity and in-progress jobs survive
+rescheduling, use a `StatefulSet` with `volumeClaimTemplates` so each replica keeps a stable
+volume. Andy's site-side release/delete controls remain the backstop for genuinely dead
+workers.
 
 Each pod's working directory is an `emptyDir` volume — in-progress work units are ephemeral and redownloaded on restart. Completed results are uploaded to the server before the pod ever stops, so nothing is lost.
 
