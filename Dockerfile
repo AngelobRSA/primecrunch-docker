@@ -1,6 +1,6 @@
 FROM debian:bookworm-slim AS downloader
-ARG VERSION=3.3.38
-ARG SHA256=ee7dca81ae9e9cdb06dd262cab6523b7f20043e3774d94199b800f28d71556a4
+ARG VERSION=3.6.5
+ARG SHA256=51b76cc1062979096d809b0b10fc8d85cfaed77e143f1d96a527fedb33963a2e
 RUN apt-get update && apt-get install -y --no-install-recommends curl ca-certificates && \
     curl -fsSL "https://api.primecrunch.com/v2/upgrade/primecrunch-linux-amd64-v${VERSION}.tar.gz" \
          -o /tmp/crunch.tar.gz && \
